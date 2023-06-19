@@ -1,0 +1,154 @@
+forward_primer  = 'vprimer.fasta'
+reverse_primer = 'cprimer.fasta'
+
+status_folder = 'status/'
+log_folder = 'log/'
+analysis_folder = 'analysis/'
+fasta_folder = 'fasta/'
+
+input_dir = 'AGRF_CAGRF21118844_KBTVJ/'
+globs = glob_wildcards('{sampleID}_R1_trimmed.fastq.gz')
+
+rule all:
+    input:
+        expand(status_folder +'{filename}_fasta_status.txt', filename = globs.sampleID)   
+
+rule unzip:
+    input:
+        r1 = '{filename}_R1_trimmed.fastq.gz',
+        r2 = '{filename}_R2_trimmed.fastq.gz'
+    output:
+        status = status_folder + '{filename}_unzip_status.txt'
+    params:
+        r1 = analysis_folder + '{filename}_R1.fastq',
+        r2 = analysis_folder + '{filename}_R2.fastq'
+    shell: """ 
+    gunzip -c {input.r1} > {params.r1}
+    gunzip -c {input.r2} > {params.r2}
+    touch {output.status}
+    """
+
+    
+
+rule assembly_pair_end:
+    input:
+        status = status_folder + '{filename}_unzip_status.txt'
+    output:
+        status = status_folder + "{filename}_assemble_status.txt"
+    params:
+        r1 = analysis_folder + "{filename}_R1.fastq",
+        r2 = analysis_folder + "{filename}_R2.fastq",
+        filename = "{filename}",
+        log = log_folder + '{filename}_AP.log'
+    shell:'''
+    AssemblePairs.py align -1 {params.r1} -2 {params.r2} --coord illumina --rc tail \
+    --outname {params.filename} --log {params.log} 
+    ParseLog.py -l {params.log} -f ID LENGTH OVERLAP ERROR PVALUE
+    touch {output.status}
+    '''
+
+rule filter_seq:
+    input:
+        status = status_folder + '{filename}_assemble_status.txt'
+    output:
+        status = status_folder + '{filename}_filter_status.txt'
+    params:
+        input_file = analysis_folder + '{filename}_assemble-pass.fastq',
+        filename = "{filename}",
+        log = log_folder + '{filename}_FS.log'
+    shell:'''
+    FilterSeq.py quality -s {params.input_file} -q 20 --outname {params.filename} --log {params.log}
+    ParseLog.py -l {params.log} -f ID QUALITY
+    touch {output.status}
+    '''
+
+rule mask_FW_primer:
+    input:
+        status = status_folder + '{filename}_filter_status.txt'
+    output:
+        status = status_folder + '{filename}_FW_primer_status.txt'
+    params:
+        input_file = analysis_folder + '{filename}_quality-pass.fastq',
+        filename = '{filename}-FWD',
+        log = log_folder + '{filename}_MPV.log',
+        rv = reverse_primer
+    shell:'''
+    MaskPrimers.py align -s {params.input_file} -p {params.rv} \
+    --maxlen 100 --revpr --mode mask --pf VPRIMER \
+    --outname {params.filename} --log {params.log}
+    ParseLog.py -l {params.log} -f ID PRIMER ERROR
+    touch {output.status}
+    '''
+
+rule mask_RV_primer:
+    input:
+        status = status_folder + '{filename}_FW_primer_status.txt'
+    output:
+        status = status_folder + '{filename}_RV_primer_status.txt'
+    params:
+        input_file = analysis_folder + '{filename}-FWD_primers-pass.fastq',
+        filename =  '{filename}-REV',
+        log = log_folder + '{filename}_MPC.log',
+        rv = forward_primer
+    shell:'''
+    MaskPrimers.py align -s {params.input_file} -p {params.rv} \
+    --maxlen 100 --revpr --mode tag --pf CPRIMER \
+    --outname {params.filename} --log {params.log}
+    ParseLog.py -l {params.log} -f ID PRIMER ERROR
+    touch {output.status}
+'''
+
+rule collapse_seq:
+    input:
+        status = status_folder + '{filename}_RV_primer_status.txt'
+    output:
+        status = status_folder + '{filename}_collapse_status.txt'
+    params:
+        input_file = analysis_folder + '{filename}-REV_primers-pass.fastq',
+        filename = '{filename}'
+    shell:'''
+    CollapseSeq.py -s {params.input_file} -n 20 --inner --uf CPRIMER --cf VPRIMER --act set \
+    --outname {params.filename}
+    touch {output.status}
+    '''
+
+rule split_seq:
+    input:
+        status = status_folder + '{filename}_collapse_status.txt'
+    output:
+        status = status_folder + '{filename}_split_status.txt'
+    params:
+        input_file = analysis_folder + '{filename}_collapse-unique.fastq',
+        filename = '{filename}',
+        count_read = 2
+    shell:'''
+    SplitSeq.py group -s {params.input_file} -f DUPCOUNT --num {params.count_read} --outname {params.filename}
+    touch {output.status}
+    '''
+
+rule parse:
+    input:
+        status = status_folder + '{filename}_split_status.txt'
+    output:
+        status = status_folder + '{filename}_parse_status.txt'
+    params:
+        header =  analysis_folder + '{filename}_atleast-2.fastq',
+        filename = '{filename}'
+    shell:'''
+    ParseHeaders.py table -s {params.header} -f ID DUPCOUNT CPRIMER VPRIMER
+    touch {output.status}
+    '''
+
+rule fasta_convertor:
+    input:
+        status = status_folder + '{filename}_parse_status.txt'
+    output:
+        status = status_folder + '{filename}_fasta_status.txt'
+    params:
+        input_file = analysis_folder + '{filename}_atleast-2.fastq', 
+        output_file = fasta_folder + '{filename}_atleast-2.fasta',
+        filename = '{filename}'
+    shell:''' 
+    seqkit fq2fa {params.input_file} -o {params.output_file}
+    '''
+
